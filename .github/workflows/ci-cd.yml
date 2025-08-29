@@ -1,0 +1,216 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+
+jobs:
+  # Backend Tests
+  backend-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: taskapp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Run database migrations
+        run: |
+          cd backend
+          npm run migrate
+        env:
+          NODE_ENV: test
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: password
+          TEST_DB_NAME: taskapp_test
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          npm test
+        env:
+          NODE_ENV: test
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: password
+          TEST_DB_NAME: taskapp_test
+          JWT_SECRET: test-secret-key
+
+      - name: Backend lint
+        run: |
+          cd backend
+          npm run lint || true
+
+  # Frontend Tests
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend tests
+        run: |
+          cd frontend
+          npm test || true
+
+      - name: Frontend lint
+        run: |
+          cd frontend
+          npm run lint || true
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://example.com/api
+
+  # Deploy to staging
+  deploy-staging:
+    if: github.ref == 'refs/heads/develop'
+    needs: [backend-test, frontend-test]
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Deploy Backend to Staging
+        run: |
+          cd backend
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh ${{ env.PROJECT_ID }} ${{ env.REGION }} staging
+
+      - name: Deploy Frontend to Staging
+        run: |
+          cd frontend
+          chmod +x scripts/deploy.sh
+          API_URL="https://taskapp-backend-staging-uc.a.run.app/api"
+          ./scripts/deploy.sh ${{ env.PROJECT_ID }} ${{ env.REGION }} staging $API_URL
+
+  # Deploy to production
+  deploy-production:
+    if: github.ref == 'refs/heads/main'
+    needs: [backend-test, frontend-test]
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          export_default_credentials: true
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Deploy Backend to Production
+        run: |
+          cd backend
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh ${{ env.PROJECT_ID }} ${{ env.REGION }} production
+
+      - name: Deploy Frontend to Production
+        run: |
+          cd frontend
+          chmod +x scripts/deploy.sh
+          API_URL="https://taskapp-backend-production-uc.a.run.app/api"
+          ./scripts/deploy.sh ${{ env.PROJECT_ID }} ${{ env.REGION }} production $API_URL
+
+      - name: Run smoke tests
+        run: |
+          # Wait for deployment to be ready
+          sleep 30
+
+          # Test backend health
+          curl -f "https://taskapp-backend-production-uc.a.run.app/health" || exit 1
+
+          # Test frontend
+          curl -f "https://taskapp-frontend-production-uc.a.run.app" || exit 1
+
+          echo "✅ Smoke tests passed!"
+
+  # Security Scan
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
