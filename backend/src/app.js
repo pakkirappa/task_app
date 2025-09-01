@@ -12,7 +12,9 @@ const { errorHandler } = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+
+// Use a different port for tests to avoid conflicts
+const PORT = process.env.NODE_ENV === 'test' ? 8001 : (process.env.PORT || 8000);
 
 // Security middleware
 app.use(helmet({
@@ -74,25 +76,27 @@ app.use('*', (req, res) => {
 // Global error handler
 app.use(errorHandler);
 
-// Graceful shutdown
-const server = app.listen(PORT, () => {
-  logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-});
-
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Process terminated');
-    process.exit(0);
+// For testing, export the app without starting the server
+if (process.env.NODE_ENV === 'test') {
+  module.exports = app;
+} else {
+  // Graceful shutdown for production/development
+  const server = app.listen(PORT, () => {
+    logger.info(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
   });
-});
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Process terminated');
-    process.exit(0);
+  process.on('SIGTERM', () => {
+    logger.info('SIGTERM received, shutting down gracefully');
+    server.close(() => {
+      logger.info('Process terminated');
+    });
   });
-});
 
-module.exports = app;
+  process.on('SIGINT', () => {
+    logger.info('SIGINT received, shutting down gracefully');
+    server.close(() => {
+      logger.info('Process terminated');
+      process.exit(0);
+    });
+  });
+}

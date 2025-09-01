@@ -61,15 +61,17 @@ jobs:
       - name: Run backend tests
         run: |
           cd backend
-          npm test
+          npm run test:ci
         env:
           NODE_ENV: test
+          PORT: 8001
           TEST_DB_HOST: localhost
           TEST_DB_PORT: 5432
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: password
           TEST_DB_NAME: taskapp_test
           JWT_SECRET: test-secret-key
+          CORS_ORIGIN: http://localhost:3000
 
       - name: Backend lint
         run: |
